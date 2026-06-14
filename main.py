@@ -1,6 +1,7 @@
 import sys, os, threading
 sys.path.insert(0, os.path.dirname(__file__))
 import cv2
+import numpy as np
 from mediapipe.tasks.python.vision.core import image as mp_image
 from core.face import FaceDetector
 from core.analyzer import FaceAnalyzer
@@ -26,14 +27,18 @@ filter_names = list(FILTER_NAMES.keys())
 filter_idx = 0
 recognized_names = {}
 
+# Haar Cascade (очень быстрый) — для детекции лиц в каждом кадре
+haar = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 frame_count = 0
-SKIP = 3  # детекция каждый 3-й кадр
-cached_boxes = []  # [(x1,y1,x2,y2, landmarks), ...]
-cached_num = 0
+face_boxes = []  # [(x1,y1,x2,y2), ...]
+filter_pts = []  # landmarks для фильтров (только когда фильтр включён)
 
 def check_known(crop, fid):
     global recognized_names
@@ -49,8 +54,6 @@ def save_known(crop, name):
         facedb.add(name, emb)
         print(f"'{name}' сохранён")
 
-tr_renderer = None
-
 while cap.isOpened():
     success, frame = cap.read()
     if not success:
@@ -59,61 +62,71 @@ while cap.isOpened():
     h, w, _ = frame.shape
     frame = cv2.flip(frame, 1)
 
-    # === Детекция лиц — каждый SKIP-кадр ===
-    if frame_count % SKIP == 0:
+    # === Быстрая детекция лиц (Haar Cascade) — каждый кадр ===
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    raw_boxes = haar.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
+    face_boxes = [(x, y, x + ex, y + ey) for x, y, ex, ey in raw_boxes]
+    num_faces = len(face_boxes)
+
+    # === Медленная детекция (MediaPipe) — только для фильтров ===
+    if current_filter != FILTER_NONE and num_faces > 0 and frame_count % 2 == 0:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_img = mp_image.Image(image_format=mp_image.ImageFormat.SRGB, data=rgb)
-        face_result = face_detector.detect(mp_img)
-        landmarks_list = face_result.face_landmarks
-        cached_num = len(landmarks_list) if landmarks_list else 0
-        cached_boxes = []
+        mp_result = face_detector.detect(mp_img)
+        filter_pts = []
+        if mp_result.face_landmarks:
+            for landmarks in mp_result.face_landmarks:
+                pts = [(p.x, p.y) for p in landmarks]
+                filter_pts.append(pts)
+    elif current_filter == FILTER_NONE:
+        filter_pts = []
 
-        if landmarks_list:
-            for landmarks in landmarks_list:
-                xs = [int(p.x * w) for p in landmarks]
-                ys = [int(p.y * h) for p in landmarks]
-                x1, x2 = max(0, min(xs)), min(w, max(xs))
-                y1, y2 = max(0, min(ys)), min(h, max(ys))
-                pad = 20
-                x1 = max(0, x1 - pad)
-                y1 = max(0, y1 - pad)
-                x2 = min(w, x2 + pad)
-                y2 = min(h, y2 + pad)
-                cached_boxes.append((x1, y1, x2, y2, [(p.x, p.y) for p in landmarks]))
-
-            # Распознавание лиц
-            if frame_count % (SKIP * config.COMPARE_INTERVAL) == 0:
-                for fi, (x1, y1, x2, y2, _) in enumerate(cached_boxes):
-                    crop = frame[y1:y2, x1:x2]
-                    if crop.size > 10:
-                        threading.Thread(target=check_known, args=(crop.copy(), fi), daemon=True).start()
-
-    # === Рисуем квадраты (из кэша если пропуск) ===
-    for fi, (x1, y1, x2, y2, pts) in enumerate(cached_boxes):
+    # === Рисуем зелёные квадраты ===
+    for fi, (x1, y1, x2, y2) in enumerate(face_boxes):
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, f"Человек {fi + 1}", (x1, y1 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+
+        # Фильтр (по MediaPipe landmarks если есть, иначе аппроксимация)
         if current_filter != FILTER_NONE:
-            apply_filter(frame, pts, current_filter)
+            if fi < len(filter_pts):
+                apply_filter(frame, filter_pts[fi], current_filter)
+            else:
+                # Аппроксимация: 5 точек (глаз Л, глаз П, нос, рот Л, рот П)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                fw, fh = x2 - x1, y2 - y1
+                approx = [
+                    (cx - fw*0.15, cy + fh*0.1),   # глаз Л
+                    (cx - fw*0.15, cy + fh*0.1),
+                    (cx + fw*0.15, cy + fh*0.1),   # глаз П
+                    (cx + fw*0.15, cy + fh*0.1),
+                ]  # минимум точек
+                # Не применяем фильтр без нормальных landmark-ов
+                pass
+
+        # Распознавание
+        if frame_count % (config.COMPARE_INTERVAL * 2) == 0:
+            crop = frame[y1:y2, x1:x2]
+            if crop.size > 10:
+                threading.Thread(target=check_known, args=(crop.copy(), fi), daemon=True).start()
+
         if fi in recognized_names:
             name, sim = recognized_names[fi]
             cv2.putText(frame, f"{name} ({sim:.0%})", (x1, y2 + 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
-    # === Эмоции ===
+    # === Эмоции (раз в 30 кадров) ===
     if frame_count % config.EMOTION_INTERVAL == 0:
         analyzer.analyze_async(frame)
     emotion_ru, emoji, age, gender_ru, history, _ = analyzer.get_state()
-    # Russian text через Pillow (только если есть русские буквы)
-    if tr_renderer is None or frame_count % 30 == 0:
-        tr_renderer = TextRenderer(frame)
-    tr_renderer.clear()
-    tr_renderer.text(f"{emoji} {emotion_ru} | {age} {gender_ru}", 10, 30, (255, 255, 255), scale=0.9)
-    tr_renderer.apply(frame)
+    tr = TextRenderer(frame)
+    tr.put(f"{emoji} {emotion_ru} | {age} {gender_ru}", (10, 30), (255, 255, 255), 18)
+    tr.apply(frame)
+
     draw_mood_graph(frame, history)
 
     # === Оверлеи ===
-    cv2.putText(frame, f"Людей: {cached_num}", (10, h - 20),
+    cv2.putText(frame, f"Людей: {num_faces}", (10, h - 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
     cv2.putText(frame, f"FPS: {fps_counter.fps:.0f}", (10, 55),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
@@ -142,8 +155,8 @@ while cap.isOpened():
         filter_idx = (filter_idx + 1) % len(filter_names)
         current_filter = filter_names[filter_idx]
         print(f"Фильтр: {FILTER_NAMES[current_filter]}")
-    elif key in (ord("c"),) and cached_boxes:
-        x1, y1, x2, y2, _ = cached_boxes[0]
+    elif key in (ord("c"),) and face_boxes:
+        x1, y1, x2, y2 = face_boxes[0]
         crop = frame[y1:y2, x1:x2]
         if crop.size > 10:
             print("Имя для лица:")
