@@ -2,7 +2,6 @@ import sys, os, threading
 sys.path.insert(0, os.path.dirname(__file__))
 os.environ["PYTHONIOENCODING"] = "utf-8"
 import cv2
-import numpy as np
 from mediapipe.tasks.python.vision.core import image as mp_image
 from core.face import FaceDetector
 from core.analyzer import FaceAnalyzer
@@ -28,7 +27,6 @@ filter_names = list(FILTER_NAMES.keys())
 filter_idx = 0
 recognized_names = {}
 
-# Haar Cascade (очень быстрый) — для детекции лиц в каждом кадре
 haar = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
@@ -38,8 +36,8 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 frame_count = 0
-face_boxes = []  # [(x1,y1,x2,y2), ...]
-filter_pts = []  # landmarks для фильтров (только когда фильтр включён)
+face_boxes = []
+filter_pts = []
 
 def check_known(crop, fid):
     global recognized_names
@@ -63,13 +61,13 @@ while cap.isOpened():
     h, w, _ = frame.shape
     frame = cv2.flip(frame, 1)
 
-    # === Быстрая детекция лиц (Haar Cascade) — каждый кадр ===
+    # === Детекция лиц (Haar) — каждый кадр ===
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     raw_boxes = haar.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
     face_boxes = [(x, y, x + ex, y + ey) for x, y, ex, ey in raw_boxes]
     num_faces = len(face_boxes)
 
-    # === Медленная детекция (MediaPipe) — только для фильтров ===
+    # === MediaPipe — только для фильтров ===
     if current_filter != FILTER_NONE and num_faces > 0 and frame_count % 2 == 0:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_img = mp_image.Image(image_format=mp_image.ImageFormat.SRGB, data=rgb)
@@ -77,13 +75,20 @@ while cap.isOpened():
         filter_pts = []
         if mp_result.face_landmarks:
             for landmarks in mp_result.face_landmarks:
-                pts = [(p.x, p.y) for p in landmarks]
-                filter_pts.append(pts)
+                filter_pts.append([(p.x, p.y) for p in landmarks])
     elif current_filter == FILTER_NONE:
         filter_pts = []
 
-    # === Рисуем зелёные квадраты ===
+    # === Рисуем людей (квадрат на лицо + туловище) ===
     for fi, (x1, y1, x2, y2) in enumerate(face_boxes):
+        fw = x2 - x1
+        fh = y2 - y1
+        # Тело: ширина 2x лица, вниз от лица
+        bx1 = max(0, x1 - fw // 2)
+        bx2 = min(w, x2 + fw // 2)
+        by1 = y2
+        by2 = min(h, y2 + fh * 3)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 255, 0), 1)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, f"Человек {fi + 1}", (x1, y1 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
@@ -99,16 +104,19 @@ while cap.isOpened():
 
         if fi in recognized_names:
             name, sim = recognized_names[fi]
-            cv2.putText(frame, f"{name} ({sim:.0%})", (x1, y2 + 18),
+            cv2.putText(frame, f"{name} ({sim:.0%})", (x1, y2 + fh + 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
     # === Эмоции (раз в 30 кадров) ===
     if frame_count % config.EMOTION_INTERVAL == 0:
         analyzer.analyze_async(frame)
-    emotion_ru, emoji, age, gender_ru, history, _ = analyzer.get_state()
-    tr = TextRenderer(frame)
-    tr.put(f"{emoji} {emotion_ru} | {age} {gender_ru}", (10, 30), (255, 255, 255), 18)
-    tr.apply(frame)
+    emotion_ru, emotion_en, age, gender_ru, history, _ = analyzer.get_state()
+    if emotion_ru:
+        emoji = config.EMOTION_EMOJI.get(emotion_en, "")
+        age_text = str(age) if age else ""
+        tr = TextRenderer(frame)
+        tr.put(f"{emoji} {emotion_ru} | {age_text} {gender_ru}", (10, 30), (255, 255, 255), 18)
+        tr.apply(frame)
 
     draw_mood_graph(frame, history)
 
