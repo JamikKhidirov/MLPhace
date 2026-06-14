@@ -1,5 +1,6 @@
 import sys, os, threading
 sys.path.insert(0, os.path.dirname(__file__))
+os.environ["PYTHONIOENCODING"] = "utf-8"
 import cv2
 import numpy as np
 from mediapipe.tasks.python.vision.core import image as mp_image
@@ -87,22 +88,8 @@ while cap.isOpened():
         cv2.putText(frame, f"Человек {fi + 1}", (x1, y1 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
-        # Фильтр (по MediaPipe landmarks если есть, иначе аппроксимация)
-        if current_filter != FILTER_NONE:
-            if fi < len(filter_pts):
-                apply_filter(frame, filter_pts[fi], current_filter)
-            else:
-                # Аппроксимация: 5 точек (глаз Л, глаз П, нос, рот Л, рот П)
-                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                fw, fh = x2 - x1, y2 - y1
-                approx = [
-                    (cx - fw*0.15, cy + fh*0.1),   # глаз Л
-                    (cx - fw*0.15, cy + fh*0.1),
-                    (cx + fw*0.15, cy + fh*0.1),   # глаз П
-                    (cx + fw*0.15, cy + fh*0.1),
-                ]  # минимум точек
-                # Не применяем фильтр без нормальных landmark-ов
-                pass
+        if current_filter != FILTER_NONE and fi < len(filter_pts):
+            apply_filter(frame, filter_pts[fi], current_filter)
 
         # Распознавание
         if frame_count % (config.COMPARE_INTERVAL * 2) == 0:
