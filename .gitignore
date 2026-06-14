@@ -1,0 +1,27 @@
+# Большие бинарники
+security_cam/dist/*.exe
+security_cam/build/
+security_cam/*.spec
+
+# Модели (скачиваются при первом запуске)
+security_cam/models/
+security_cam/__pycache__/
+security_cam/**/__pycache__/
+
+# Алерты и записи
+security_cam/alerts/
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Системное
+Thumbs.db
+*.pyc
+__pycache__/
+.DS_Store
